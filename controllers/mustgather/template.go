@@ -50,8 +50,27 @@ const (
 	uploadEnvMustGatherOutput = "must_gather_output"
 	uploadEnvMustGatherUpload = "must_gather_upload"
 	uploadEnvFilenamePrefix   = "FILENAME_PREFIX"
-	uploadCommand             = "count=0\nuntil [ $count -gt 4 ]\ndo\n  while `pgrep -a gather > /dev/null`\n  do\n    echo \"waiting for gathers to complete ...\"\n    sleep 120\n    count=0\n  done\n  echo \"no gather is running ($count / 4)\"\n  ((count++))\n  sleep 30\ndone\n/usr/local/bin/upload"
-	uploadCommandDirect       = "/usr/local/bin/upload"
+	// uploadCommand waits for gather to finish before uploading. It polls every
+	// 5s and starts once 3 consecutive polls find no gather process (debounces
+	// the gaps between gather_* sub-scripts). If no gather process is ever seen
+	// (custom image or command whose process names do not match), misses only
+	// count after 150s, which keeps the previous fixed-delay behavior for that
+	// case. UPLOAD_POLL_INTERVAL / UPLOAD_POLL_MISSES / UPLOAD_POLL_GRACE are
+	// not set on the Job; they exist so unit tests can run the loop quickly.
+	uploadCommand = `seen=0; misses=0; waited=0
+while :; do
+  if pgrep gather > /dev/null; then
+    seen=1; misses=0
+    if [ $((waited % 60)) -eq 0 ]; then echo "waiting for gathers to complete ..."; fi
+  elif [ $seen -eq 1 ] || [ $waited -ge ${UPLOAD_POLL_GRACE:-150} ]; then
+    misses=$((misses + 1))
+    echo "no gather is running ($misses / ${UPLOAD_POLL_MISSES:-3})"
+    if [ $misses -ge ${UPLOAD_POLL_MISSES:-3} ]; then break; fi
+  fi
+  sleep ${UPLOAD_POLL_INTERVAL:-5}; waited=$((waited + ${UPLOAD_POLL_INTERVAL:-5}))
+done
+/usr/local/bin/upload`
+	uploadCommandDirect = "/usr/local/bin/upload"
 
 	// SSH directory and known hosts file
 	sshDir         = "/tmp/must-gather-operator/.ssh"

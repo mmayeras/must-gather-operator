@@ -3,7 +3,10 @@ package mustgather
 import (
 	"fmt"
 	"math"
+	"os"
+	"os/exec"
 	"path"
+	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
@@ -1187,4 +1190,57 @@ func envValues(container v1.Container) map[string]string {
 		m[e.Name] = e.Value
 	}
 	return m
+}
+
+// Test_uploadCommand_waitsForGather runs the real upload wait loop with a stub
+// pgrep and a stub upload binary to check when the upload starts.
+func Test_uploadCommand_waitsForGather(t *testing.T) {
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash not available")
+	}
+
+	tests := []struct {
+		name string
+		// gatherPolls is how many pgrep calls report a running gather (-1: never).
+		gatherPolls    int
+		wantPgrepCalls int
+	}{
+		// 2 hits, then 3 misses in a row -> upload.
+		{name: "starts after gather exits and misses are debounced", gatherPolls: 2, wantPgrepCalls: 5},
+		// Never seen: misses only count once waited >= grace (2s at 1s interval),
+		// so polls 1-2 are ignored, then 3 misses.
+		{name: "falls back to grace period when gather is never seen", gatherPolls: 0, wantPgrepCalls: 5},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			counter := filepath.Join(dir, "count")
+			stub := fmt.Sprintf("#!/bin/bash\nn=$(cat %[1]s 2>/dev/null || echo 0); n=$((n+1)); echo $n > %[1]s\n[ $n -le %[2]d ]\n", counter, tt.gatherPolls)
+			if err := os.WriteFile(filepath.Join(dir, "pgrep"), []byte(stub), 0o700); err != nil {
+				t.Fatal(err)
+			}
+
+			script := strings.Replace(uploadCommand, "/usr/local/bin/upload", "echo UPLOAD-STARTED", 1)
+			cmd := exec.Command(bash, "-c", script)
+			cmd.Env = []string{
+				"PATH=" + dir + ":" + os.Getenv("PATH"),
+				"UPLOAD_POLL_INTERVAL=1",
+				"UPLOAD_POLL_MISSES=3",
+				"UPLOAD_POLL_GRACE=2",
+			}
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("script failed: %v\n%s", err, out)
+			}
+			if !strings.Contains(string(out), "UPLOAD-STARTED") {
+				t.Fatalf("upload did not start:\n%s", out)
+			}
+			calls, _ := os.ReadFile(counter)
+			if got := strings.TrimSpace(string(calls)); got != strconv.Itoa(tt.wantPgrepCalls) {
+				t.Errorf("pgrep calls = %s, want %d\n%s", got, tt.wantPgrepCalls, out)
+			}
+		})
+	}
 }

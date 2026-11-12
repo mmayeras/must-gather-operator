@@ -15,6 +15,7 @@
 - The gather container is present unless `obfuscate.source` names a PVC (`hasObfuscateSource`). That path obfuscates and/or uploads an existing tree; it does not run must-gather.
 - The upload container is added only when SFTP upload is configured (`hasSFTPUpload`) or obfuscation is enabled (`isObfuscateEnabled`).
 - The Pod always sets `ShareProcessNamespace: true`. When gather and upload both run, upload `pgrep`s for gather completion. Gather writes `/must-gather`; upload reads it. Obfuscate-source Jobs have no gather process; upload uses `uploadCommandDirect` against the source PVC.
+- Upload waits with `uploadCommand`: it polls `pgrep gather` every 5s and starts after 3 consecutive misses once a gather process has been seen (about 15s after gather exits). If no gather process is ever seen, misses count only after a 150s grace, matching the previous fixed delay.
 - Job `restartPolicy` is `Never` and `backoffLimit` is `3`. The controller treats `Status.Failed > backoffLimit` as terminal. Changing one without the other breaks failure detection.
 - Timeout is enforced in the gather command (`timeout …`) rather than `ActiveDeadlineSeconds`.
 - Jobs prefer infra nodes (`node-role.kubernetes.io/infra`) with a matching NoSchedule toleration so collection does not land on application nodes by default.
@@ -30,6 +31,7 @@
 
 ## Trade-offs
 
-- `pgrep` depends on process names in the gather image. A custom image that does not look like origin-must-gather can stall upload.
+- `pgrep` depends on process names in the gather image. A custom image that does not look like origin-must-gather can stall upload, or (if no gather process is ever seen) start uploading after the 150s grace while it is still running.
+- The 3 x 5s debounce assumes gaps between `gather_*` sub-scripts are shorter than 15s. The previous loop (5 x 30s, re-checked every 120s) tolerated longer gaps but delayed every upload by 150-270s.
 - Shared process namespace lets upload see gather processes (and the SA token is Pod-scoped). Isolation is by image and command, not by privilege boundary.
 - An upload failure creates a new Pod that reruns gather when gather is in the Job; there is no "upload-only retry" on that path. Obfuscate-source Jobs retry upload/obfuscate only.
